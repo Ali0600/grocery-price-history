@@ -1,0 +1,79 @@
+name: Weekly collect
+
+# Captures the week's deduped offers from the grocery-helper API into a committed
+# snapshot, then rebuilds the price-history index. Runs SUNDAY 09:00 UTC — three
+# hours after grocery-helper's own weekly wipe-and-rescrape (Sun 06:00 UTC), so the
+# fresh week's flyers are loaded and the Render instance is warm from that run.
+# The repo is the database: every snapshot is an append-only git commit.
+on:
+  schedule:
+    - cron: '0 9 * * 0'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write # alert issue when the weekly collect fails
+
+concurrency:
+  group: collect
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    name: Snapshot + reindex
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # collect.ts retries ×3 internally (Render free tier cold-starts) and exits
+      # non-zero — WITHOUT writing a snapshot — if the response looks like a
+      # sample-data fallback (< 300 offers or a single chain).
+      - run: npm run collect
+      - run: npm run aggregate
+      - name: Commit snapshot + index
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data
+          if git diff --cached --quiet; then
+            echo "no changes to commit (already collected this week)"
+          else
+            git commit -m "data: weekly snapshot $(date -u +%F)"
+            git push
+          fi
+
+      # A silent weekly failure is invisible; surface it as a (deduplicated) issue.
+      - name: Alert on failure
+        if: failure()
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const run = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `The weekly collect failed on ${new Date().toISOString()}.\n\nRun: ${run}`;
+            const { data: open } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'collect-failure',
+            });
+            if (open.length) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: open[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: 'Weekly collect failed',
+                body,
+                labels: ['collect-failure'],
+              });
+            }
