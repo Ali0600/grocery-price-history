@@ -18,7 +18,7 @@ a git commit — `git log -p data/` *is* the audit trail.
 grocery-helper (Render)                this repo
   Sun 06:00 UTC wipe + re-scrape         Sun 09:00 UTC collect.yml:
   GET /api/offers ────────────────────►    scripts/collect.ts  → data/snapshots/berlin-2026-W28.json
-                                           scripts/aggregate.ts → data/index.json
+                                           scripts/aggregate.ts → data/index.json + index-min.json
                                            commit + push
 ```
 
@@ -49,13 +49,33 @@ Verdicts need ≥3 weeks of history; younger products report `new`.
   address, or postal code. Region granularity is deliberately coarse (`berlin`).
 - `data/index.json` — per `(region, chain, name_key)`: display label, category,
   `series: [[week, price_cents, unit_price_cents]]`, stats, and the current verdict.
+- `data/index-min.json` — the same shape, filtered to **`weeks_seen >= 2`**. Two sightings is
+  the minimum that supports a comparison; one supports none. As of 2026-W31 that is 412 of
+  6,588 products — **181 KB instead of 2.76 MB**, a 15x reduction that drops nothing a consumer
+  could have displayed. The envelope keeps the full `weeks` array and `stats` is passed through
+  untouched (see `filterToTrend`).
+
+### These two files are a published API
+
+Both are read straight off `raw.githubusercontent.com/.../main/data/…` by the **grocery-helper
+mobile app** (`mobile/src/usePriceHistory.ts`), which fetches `index-min.json`, projects it down
+to the products in the user's History, and caches only that projection. So:
+
+- the **paths are load-bearing** — renaming or moving either file breaks installed apps, which
+  have no way to discover a new location;
+- the field names under `products[]` are a contract, and `stats.weeks_seen` in particular is
+  what decides which tier the app renders;
+- the client refuses to parse a body over its size tripwire, which is *why* the filtered file
+  exists — the full index crosses it around week 26 of collection.
+
+`src/publish.test.ts` pins the shape and the subset relationship.
 
 ## Run locally
 
 ```bash
 npm install
 npm run collect      # fetch this week's offers → data/snapshots/
-npm run aggregate    # rebuild data/index.json
+npm run aggregate    # rebuild data/index.json + data/index-min.json
 npm test             # vitest (normalization parity, verdicts, guards)
 npm run lint && npm run typecheck
 ```
